@@ -15,7 +15,7 @@ from .t1_env_cfg import T1EnvCfg
 ##
 
 gym.register(
-    id="Isaac-T1-v0",
+    id="t1",
     entry_point=f"{__name__}.t1_env:T1Env",
     disable_env_checker=True,
     kwargs={

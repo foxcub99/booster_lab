@@ -54,7 +54,7 @@ class T1EnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096, env_spacing=1.0, replicate_physics=True
+        num_envs=4096, env_spacing=2.5, replicate_physics=True
     )
 
     # terrain
