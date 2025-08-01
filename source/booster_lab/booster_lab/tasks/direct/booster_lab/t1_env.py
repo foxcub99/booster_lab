@@ -54,8 +54,8 @@ class T1Env(DirectRLEnv):
         )
         self.projected_gravity = torch.zeros(self.num_envs, 3, device=self.device)
 
-        # Previous states for acceleration calculation
-        self.last_dof_vel = torch.zeros(self.num_envs, 12, device=self.device)
+        # Previous states for acceleration calculation - will be resized after robot initialization
+        self.last_dof_vel = None
         self.last_root_vel = torch.zeros(self.num_envs, 6, device=self.device)
         self.last_actions = torch.zeros(
             self.num_envs, self.cfg.action_space, device=self.device
@@ -186,6 +186,11 @@ class T1Env(DirectRLEnv):
         print(
             f"Successfully initialized {len(self.leg_dof_indices)} joint indices, {len(self.contact_body_indices)} contact body indices, and {len(self.penalized_contact_indices) if self.penalized_contact_indices is not None else 0} penalized contact indices"
         )
+
+        # Initialize last_dof_vel with correct size now that we know the number of DOFs
+        if self.last_dof_vel is None:
+            num_dofs = self.robot.data.joint_vel.shape[-1]
+            self.last_dof_vel = torch.zeros(self.num_envs, num_dofs, device=self.device)
 
     def _quat_rotate_inverse(self, q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Rotate vector v by the inverse of quaternion q."""
@@ -321,11 +326,9 @@ class T1Env(DirectRLEnv):
         """Compute reward for the current step - match Isaac Gym implementation."""
         total_reward = torch.zeros(self.num_envs, device=self.device)
 
-        # Survival reward
         survival_rew = self.cfg.survival_reward_scale
         total_reward += survival_rew
 
-        # Linear velocity tracking rewards (X and Y separately like Isaac Gym)
         lin_vel_x_error = torch.square(
             self.commands[:, 0] - self.filtered_lin_vel[:, 0]
         )
@@ -344,7 +347,6 @@ class T1Env(DirectRLEnv):
         )
         total_reward += lin_vel_y_rew
 
-        # Angular velocity tracking reward
         ang_vel_error = torch.square(self.commands[:, 2] - self.filtered_ang_vel[:, 2])
         ang_vel_rew = (
             torch.exp(-ang_vel_error / self.cfg.tracking_sigma)
@@ -352,66 +354,181 @@ class T1Env(DirectRLEnv):
         )
         total_reward += ang_vel_rew
 
-        # Base height penalty
         base_height = self.robot.data.root_pos_w[:, 2]
         height_error = torch.square(base_height - self.cfg.base_height_target)
         height_penalty = height_error * self.cfg.base_height_reward_scale
         total_reward += height_penalty
 
-        # Orientation penalty (keep robot upright)
-        orientation_penalty = (
-            torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
-            * self.cfg.orientation_reward_scale
-        )
-        total_reward += orientation_penalty
+        # Collision penalty (undesired contacts) - simplified for now
+        # TODO: Implement proper contact force detection in Isaac Lab
+        collision_penalty = torch.zeros(self.num_envs, device=self.device)
+        total_reward += collision_penalty
 
-        # Torque penalty
-        torque_penalty = (
-            torch.sum(torch.square(self.robot.data.applied_torque), dim=1)
-            * self.cfg.torques_reward_scale
-        )
-        total_reward += torque_penalty
-
-        # DOF velocity penalty
-        if self.leg_dof_indices is not None:
-            joint_vel = self.robot.data.joint_vel[:, self.leg_dof_indices]
-        else:
-            joint_vel = self.robot.data.joint_vel[:, :12]
-        dof_vel_penalty = (
-            torch.sum(torch.square(joint_vel), dim=1) * self.cfg.dof_vel_reward_scale
-        )
-        total_reward += dof_vel_penalty
-
-        # DOF acceleration penalty
-        joint_acc = (joint_vel - self.last_dof_vel) / self.step_dt
-        dof_acc_penalty = (
-            torch.sum(torch.square(joint_acc), dim=1) * self.cfg.dof_acc_reward_scale
-        )
-        total_reward += dof_acc_penalty
-
-        # Action rate penalty
-        action_rate_penalty = torch.sum(
-            torch.square(self.last_actions - self.actions), dim=1
-        )
-        total_reward += action_rate_penalty
-
-        # Linear velocity Z penalty (discourage jumping/falling)
         lin_vel_z_penalty = (
             torch.square(self.filtered_lin_vel[:, 2]) * self.cfg.lin_vel_z_reward_scale
         )
         total_reward += lin_vel_z_penalty
 
-        # Angular velocity XY penalty (discourage roll/pitch)
+        # TODO check root_ang_vel_b is correct for xy
         ang_vel_xy_penalty = (
-            torch.sum(torch.square(self.robot.data.root_ang_vel_b[:, :2]), dim=1)
+            torch.sum(torch.square(self.robot.data.root_ang_vel_b[:, :2]), dim=-1)
             * self.cfg.ang_vel_xy_reward_scale
         )
         total_reward += ang_vel_xy_penalty
 
-        # Collision penalty (undesired contacts) - simplified for now
-        # TODO: Implement proper contact force detection in Isaac Lab
-        collision_penalty = torch.zeros(self.num_envs, device=self.device)
-        total_reward += collision_penalty
+        orientation_penalty = (
+            torch.sum(torch.square(self.projected_gravity[:, :2]), dim=-1)
+            * self.cfg.orientation_reward_scale
+        )
+        total_reward += orientation_penalty
+
+        # TODO check applied torque is equivalent to self.torques
+        torque_penalty = (
+            torch.sum(torch.square(self.robot.data.applied_torque), dim=-1)
+            * self.cfg.torques_reward_scale
+        )
+        total_reward += torque_penalty
+
+        # DOF velocity penalty
+        dof_vel = self.robot.data.joint_vel
+        dof_vel_penalty = (
+            torch.sum(torch.square(dof_vel), dim=-1) * self.cfg.dof_vel_reward_scale
+        )
+        total_reward += dof_vel_penalty
+
+        # DOF acceleration penalty
+        joint_acc = (self.last_dof_vel - dof_vel) / self.step_dt
+        dof_acc_penalty = (
+            torch.sum(torch.square(joint_acc), dim=-1) * self.cfg.dof_acc_reward_scale
+        )
+        total_reward += dof_acc_penalty
+
+        # TODO missing root acc
+
+        action_rate_penalty = (
+            torch.sum(torch.square(self.last_actions - self.actions), dim=-1)
+            * self.cfg.action_rate_reward_scale
+        )
+        total_reward += action_rate_penalty
+
+        # TODO
+        # DOF position limits penalty
+        if self.leg_dof_indices is not None:
+            joint_pos = self.robot.data.joint_pos[:, self.leg_dof_indices]
+            # Get joint limits for the leg joints
+            # For now, use approximate limits based on URDF
+            lower_limits = torch.tensor(
+                [-2.8, -0.8, -1.5, 0.0, -1.5, -0.4] * 2, device=self.device
+            )
+            upper_limits = torch.tensor(
+                [2.8, 0.8, 1.5, 2.5, 1.5, 0.4] * 2, device=self.device
+            )
+
+            lower_soft = lower_limits + 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
+                upper_limits - lower_limits
+            )
+            upper_soft = upper_limits - 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
+                upper_limits - lower_limits
+            )
+
+            dof_pos_limits_penalty = (
+                torch.sum(
+                    ((joint_pos < lower_soft) | (joint_pos > upper_soft)).float(),
+                    dim=-1,
+                )
+                * self.cfg.dof_pos_limits_reward_scale
+            )
+            total_reward += dof_pos_limits_penalty
+
+        # DOF velocity limits penalty TODO
+        # if (
+        #     hasattr(self.cfg, "dof_vel_limits_reward_scale")
+        #     and self.cfg.dof_vel_limits_reward_scale != 0
+        # ):
+        #     vel_limit = 30.0  # From actuator config
+        #     dof_vel_limits_penalty = (
+        #         torch.sum(
+        #             (
+        #                 torch.abs(dof_vel) - vel_limit * self.cfg.soft_dof_vel_limit
+        #             ).clamp(min=0.0, max=1.0),
+        #             dim=-1,
+        #         )
+        #         * self.cfg.dof_vel_limits_reward_scale
+        #     )
+        #     total_reward += dof_vel_limits_penalty
+
+        # Torque limits penalty TODO check same as above torque
+        # if (
+        #     hasattr(self.cfg, "torque_limits_reward_scale")
+        #     and self.cfg.torque_limits_reward_scale != 0
+        # ):
+        #     torque_limit = 400.0  # From actuator config
+        #     torque_limits_penalty = (
+        #         torch.sum(
+        #             (
+        #                 torch.abs(self.robot.data.applied_torque)
+        #                 - torque_limit * self.cfg.soft_torque_limit
+        #             ).clamp(min=0.0),
+        #             dim=-1,
+        #         )
+        #         * self.cfg.torque_limits_reward_scale
+        #     )
+        #     total_reward += torque_limits_penalty
+
+        # Torque tiredness penalty TODO
+        if (
+            hasattr(self.cfg, "torque_tiredness_reward_scale")
+            and self.cfg.torque_tiredness_reward_scale != 0
+        ):
+            torque_limit = 400.0
+            torque_tiredness_penalty = (
+                torch.sum(
+                    torch.square(self.robot.data.applied_torque / torque_limit).clamp(
+                        max=1.0
+                    ),
+                    dim=-1,
+                )
+                * self.cfg.torque_tiredness_reward_scale
+            )
+            total_reward += torque_tiredness_penalty
+
+        # Power penalty TODO
+        if hasattr(self.cfg, "power_reward_scale") and self.cfg.power_reward_scale != 0:
+            power_penalty = (
+                torch.sum(
+                    (self.robot.data.applied_torque * dof_vel).clamp(min=0.0), dim=-1
+                )
+                * self.cfg.power_reward_scale
+            )
+            total_reward += power_penalty
+
+        # missed feet slip
+
+        # missed feet vel z
+        # (disabled)
+
+        # missed feet roll
+
+        # missed feet yaw diff
+
+        # missed feet yaw mean
+
+        # missed reward feet distance
+
+        # Simple swing reward based on gait phase
+        left_swing = (
+            torch.abs(self.gait_process - 0.25) < 0.5 * self.cfg.swing_period
+        ) & (self.gait_frequency > 1e-8)
+        right_swing = (
+            torch.abs(self.gait_process - 0.75) < 0.5 * self.cfg.swing_period
+        ) & (self.gait_frequency > 1e-8)
+
+        # For now, assume feet are not in contact during swing (simplified)
+        # TODO this needs a contact something
+        feet_swing_reward = (
+            left_swing.float() + right_swing.float()
+        ) * self.cfg.feet_swing_reward_scale
+        total_reward += feet_swing_reward
 
         # Store episode sums for tracking
         self.episode_sums["survival"] += survival_rew
@@ -426,13 +543,13 @@ class T1Env(DirectRLEnv):
         self.episode_sums["action_rate"] += -action_rate_penalty
 
         # Update previous states
-        self.last_dof_vel = joint_vel.clone()
+        self.last_dof_vel = dof_vel.clone()
         self.last_root_vel = torch.cat(
             [self.robot.data.root_lin_vel_w, self.robot.data.root_ang_vel_w], dim=1
         ).clone()
         self.last_actions = self.actions.clone()
 
-        return total_reward
+        return total_reward * self.step_dt
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute done conditions."""
@@ -510,16 +627,12 @@ class T1Env(DirectRLEnv):
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
         # Reset tracking variables
-        if not hasattr(self, "last_dof_vel") or self.leg_dof_indices is None:
-            # Initialize with safe defaults if joint indices not ready yet
-            if self.leg_dof_indices is not None:
-                self.last_dof_vel = torch.zeros(
-                    (self.num_envs, len(self.leg_dof_indices)), device=self.device
-                )
-            else:
-                self.last_dof_vel = torch.zeros(
-                    (self.num_envs, 12), device=self.device
-                )  # Default to 12 leg joints
+        if self.last_dof_vel is None:
+            # Initialize with correct number of DOFs
+            num_dofs = self.robot.data.joint_vel.shape[-1]
+            self.last_dof_vel = torch.zeros(
+                (self.num_envs, num_dofs), device=self.device
+            )
         if not hasattr(self, "last_actions"):
             self.last_actions = torch.zeros(
                 (self.num_envs, self.cfg.action_space), device=self.device

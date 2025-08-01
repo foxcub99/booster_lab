@@ -158,25 +158,25 @@ class T1EnvCfg(DirectRLEnvCfg):
     base_height_reward_scale = -20.0
     orientation_reward_scale = -5.0
     torques_reward_scale = -2.0e-4
-    # torque_tiredness_reward_scale = -1.0e-2
-    # power_reward_scale = -2.0e-3
+    torque_tiredness_reward_scale = -1.0e-2
+    power_reward_scale = -2.0e-3
     lin_vel_z_reward_scale = -2.0
     ang_vel_xy_reward_scale = -0.2
     dof_vel_reward_scale = -1.0e-4
     dof_acc_reward_scale = -1.0e-7
-    # root_acc_reward_scale = -1.0e-4
-    # action_rate_reward_scale = -1.0
-    # dof_pos_limits_reward_scale = -1.0
-    # dof_vel_limits_reward_scale = 0.0
-    # torque_limits_reward_scale = 0.0
-    # collision_reward_scale = -1.0
-    # feet_slip_reward_scale = -0.1
-    # feet_vel_z_reward_scale = 0.0
-    # feet_yaw_diff_reward_scale = -1.0
-    # feet_yaw_mean_reward_scale = -1.0
-    # feet_roll_reward_scale = -0.1
-    # feet_distance_reward_scale = -1.0
-    # feet_swing_reward_scale = 3.0
+    root_acc_reward_scale = -1.0e-4
+    action_rate_reward_scale = -1.0
+    dof_pos_limits_reward_scale = -1.0
+    dof_vel_limits_reward_scale = 0.0  # Disabled in Isaac Gym
+    torque_limits_reward_scale = 0.0  # Disabled in Isaac Gym
+    collision_reward_scale = -1.0
+    feet_slip_reward_scale = -0.1
+    feet_vel_z_reward_scale = 0.0  # Disabled in Isaac Gym
+    feet_yaw_diff_reward_scale = -1.0
+    feet_yaw_mean_reward_scale = -1.0
+    feet_roll_reward_scale = -0.1
+    feet_distance_reward_scale = -1.0
+    feet_swing_reward_scale = 3.0
 
     # normalization
     gravity_normalization = 1.0
@@ -195,13 +195,13 @@ class T1EnvCfg(DirectRLEnvCfg):
     # tracking
     tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
     base_height_target = 0.68
-    # soft_dof_pos_limit = 1.0  # percentage of urdf limits
-    # soft_dof_vel_limit = 1.0
-    # soft_torque_limit = 1.0
+    soft_dof_pos_limit = 1.0  # percentage of urdf limits
+    soft_dof_vel_limit = 1.0
+    soft_torque_limit = 1.0
 
     # gait parameters
-    # swing_period = 0.2
-    # feet_distance_ref = 0.2
+    swing_period = 0.2
+    feet_distance_ref = 0.2
 
     # command ranges
     max_absolute_command_vel_x = 1.0  # Match Isaac Gym's command speed range
