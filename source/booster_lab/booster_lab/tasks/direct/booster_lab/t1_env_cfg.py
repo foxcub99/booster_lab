@@ -7,6 +7,7 @@ from dataclasses import MISSING
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
@@ -28,38 +29,27 @@ class T1EnvCfg(DirectRLEnvCfg):
     episode_length_s = 5.0
     decimation = 2
     num_actions = 12
-    num_observations = 47
+    num_observations = 49  # Updated to match actual observation size
     num_states = 0  # No asymmetric observations for now
+
+    # Define the action and observation spaces properly
+    action_space = 12
+    observation_space = 49  # Updated to match actual observation size
+    state_space = 0
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,  # 120 Hz (decimation=2 gives effective 60 Hz)
         render_interval=decimation,
-        disable_contact_processing=True,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=1.0,
         ),
-        physx=sim_utils.PhysxCfg(
-            solver_type=1,  # TGS
-            num_threads=0,
-            use_gpu=True,
-            num_position_iterations=4,
-            num_velocity_iterations=0,
-            contact_offset=0.01,
-            rest_offset=0.001,
-            bounce_threshold_velocity=0.2,
-            max_depenetration_velocity=1.0,
-            friction_offset_threshold=0.04,
-            friction_correlation_distance=0.025,
-            enable_sleeping=True,
-            enable_stabilization=True,
-            max_gpu_contact_pairs=2**23,
-            default_buffer_size_multiplier=5,
-            contact_collection=2,  # CC_LAST_SUBSTEP = 2
-        ),
+        # physx=sim_utils.PhysxCfg(
+        #     solver_type=1,  # TGS
+        # ),
     )
 
     # scene
@@ -72,6 +62,7 @@ class T1EnvCfg(DirectRLEnvCfg):
         prim_path="/World/ground",
         terrain_type="plane",
         collision_group=-1,
+        env_spacing=1.0,  # Add environment spacing for grid-like origins
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -85,7 +76,7 @@ class T1EnvCfg(DirectRLEnvCfg):
     robot: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"resources/t1_usd/t1.usd",  # Use the USD file provided by Booster Robotics
+            usd_path=f"C:/Users/reill/booster_gym/booster_lab/source/booster_lab/booster_lab/assets/t1/t1.usd",  # absolute filepath
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
@@ -121,10 +112,24 @@ class T1EnvCfg(DirectRLEnvCfg):
                 "Right_Ankle_Pitch": -0.25,
                 "Right_Ankle_Roll": 0.0,
             },
-            joint_vel=0.0,
+            joint_vel={
+                # Initialize all joint velocities to zero
+                "Left_Hip_Pitch": 0.0,
+                "Left_Hip_Roll": 0.0,
+                "Left_Hip_Yaw": 0.0,
+                "Left_Knee_Pitch": 0.0,
+                "Left_Ankle_Pitch": 0.0,
+                "Left_Ankle_Roll": 0.0,
+                "Right_Hip_Pitch": 0.0,
+                "Right_Hip_Roll": 0.0,
+                "Right_Hip_Yaw": 0.0,
+                "Right_Knee_Pitch": 0.0,
+                "Right_Ankle_Pitch": 0.0,
+                "Right_Ankle_Roll": 0.0,
+            },
         ),
         actuators={
-            "legs": sim_utils.DCMotorCfg(
+            "legs": ImplicitActuatorCfg(
                 joint_names_expr=[
                     ".*_Hip_.*",  # Matches all hip joints
                     ".*_Knee_.*",  # Matches all knee joints

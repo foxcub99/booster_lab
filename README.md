@@ -11,3 +11,5 @@ with external project, you need to add this to isaaclabs path
 personally i didnt install with python so I used isaaclabs python
 
 ```make isaac ARGS="-m pip install -e source/booster_lab```
+
+line 78 of t1_env_cfg needs absolute path for some reason, this will change depending on your setup.
