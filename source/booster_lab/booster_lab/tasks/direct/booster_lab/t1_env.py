@@ -12,10 +12,8 @@ from typing import TYPE_CHECKING
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
-from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.envs import DirectRLEnv
 from isaaclab.terrains import TerrainImporter
-from isaaclab.utils.math import subtract_frame_transforms
 
 if TYPE_CHECKING:
     from .t1_env_cfg import T1EnvCfg
@@ -33,28 +31,62 @@ class T1Env(DirectRLEnv):
         # Joint and body indices will be set after scene is created
         self.leg_dof_indices = None
         self.contact_body_indices = None
+        self.penalized_contact_indices = None
 
-        # Command tracking - max_episode_length is automatically set by Isaac Lab
+        # Velocity filtering (matching Isaac Gym)
+        self.filtered_lin_vel = torch.zeros(self.num_envs, 3, device=self.device)
+        self.filtered_ang_vel = torch.zeros(self.num_envs, 3, device=self.device)
 
-        # Rewards tracking
+        # Gait tracking (matching Isaac Gym)
+        self.gait_frequency = (
+            torch.ones(self.num_envs, device=self.device) * 1.5
+        )  # Default 1.5 Hz
+        self.gait_process = torch.zeros(self.num_envs, device=self.device)
+
+        # Command tracking
+        self.commands = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self.device
+        )
+
+        # Gravity vector
+        self.gravity_vec = torch.tensor([0.0, 0.0, -1.0], device=self.device).repeat(
+            self.num_envs, 1
+        )
+        self.projected_gravity = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # Previous states for acceleration calculation
+        self.last_dof_vel = torch.zeros(self.num_envs, 12, device=self.device)
+        self.last_root_vel = torch.zeros(self.num_envs, 6, device=self.device)
+        self.last_actions = torch.zeros(
+            self.num_envs, self.cfg.action_space, device=self.device
+        )
+
+        # Default joint positions (matching Isaac Gym)
+        self.default_dof_pos = torch.zeros(self.num_envs, 12, device=self.device)
+        # Set defaults based on initial configuration (Hip_Pitch, Knee_Pitch, Ankle_Pitch)
+        self.default_dof_pos[:, 0] = -0.2  # Left_Hip_Pitch
+        self.default_dof_pos[:, 3] = 0.4  # Left_Knee_Pitch
+        self.default_dof_pos[:, 4] = -0.25  # Left_Ankle_Pitch
+        self.default_dof_pos[:, 6] = -0.2  # Right_Hip_Pitch
+        self.default_dof_pos[:, 9] = 0.4  # Right_Knee_Pitch
+        self.default_dof_pos[:, 10] = -0.25  # Right_Ankle_Pitch
+
+        # Episode tracking
         self.episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
-                "track_lin_vel_xy_exp",
-                "track_ang_vel_z_exp",
-                "lin_vel_z_l2",
-                "ang_vel_xy_l2",
-                "dof_torques_l2",
-                "dof_acc_l2",
-                "action_rate_l2",
-                "feet_air_time",
-                "undesired_contacts",
-                "flat_orientation_l2",
+                "survival",
+                "tracking_lin_vel_x",
+                "tracking_lin_vel_y",
+                "tracking_ang_vel",
+                "base_height",
+                "orientation",
+                "torques",
+                "dof_vel",
+                "dof_acc",
+                "action_rate",
             ]
         }
-
-        # Command generators
-        self._init_command_terms()
 
     def _get_joint_indices(self):
         """Get joint indices for easier access."""
@@ -101,7 +133,7 @@ class T1Env(DirectRLEnv):
             self.leg_dof_indices, dtype=torch.long, device=self.device
         )
 
-        # Contact body indices
+        # Contact body indices for feet
         self.contact_body_indices = []
         for name in self.cfg.contact_bodies:
             try:
@@ -113,14 +145,46 @@ class T1Env(DirectRLEnv):
                     print(f"Warning: Body {name} not found in robot")
             except Exception as e:
                 print(f"Warning: Error finding body {name}: {e}")
-                return  # Exit early if there are issues
 
         self.contact_body_indices = torch.tensor(
             self.contact_body_indices, dtype=torch.long, device=self.device
         )
 
+        # Contact body indices (penalized contacts)
+        self.penalized_contact_names = []
+        penalized_names = [
+            "Trunk",
+            "H1",
+            "H2",
+            "AL",
+            "AR",
+            "Waist",
+            "Hip",
+            "Shank",
+            "Ankle",
+        ]
+        body_names = self.robot.body_names
+        for name in penalized_names:
+            self.penalized_contact_names.extend([s for s in body_names if name in s])
+
+        self.penalized_contact_indices = []
+        for name in self.penalized_contact_names:
+            try:
+                idx, _ = self.robot.find_bodies(name)
+                if len(idx) > 0:
+                    self.penalized_contact_indices.append(idx[0])
+            except Exception as e:
+                print(f"Warning: Error finding penalized contact body {name}: {e}")
+
+        if len(self.penalized_contact_indices) > 0:
+            self.penalized_contact_indices = torch.tensor(
+                self.penalized_contact_indices, dtype=torch.long, device=self.device
+            )
+        else:
+            self.penalized_contact_indices = None
+
         print(
-            f"Successfully initialized {len(self.leg_dof_indices)} joint indices and {len(self.contact_body_indices)} contact body indices"
+            f"Successfully initialized {len(self.leg_dof_indices)} joint indices, {len(self.contact_body_indices)} contact body indices, and {len(self.penalized_contact_indices) if self.penalized_contact_indices is not None else 0} penalized contact indices"
         )
 
     def _quat_rotate_inverse(self, q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -131,15 +195,6 @@ class T1Env(DirectRLEnv):
         b = torch.cross(q_vec, v, dim=-1) * q_w.unsqueeze(-1) * 2.0
         c = q_vec * torch.sum(q_vec * v, dim=-1, keepdim=True) * 2.0
         return a - b + c
-
-    def _init_command_terms(self):
-        """Initialize command tracking variables."""
-        self.commands = torch.zeros(
-            self.num_envs, 3, dtype=torch.float, device=self.device
-        )
-        self.command_sums = torch.zeros(
-            self.num_envs, dtype=torch.float, device=self.device
-        )
 
     def _setup_scene(self):
         """Setup the scene with robot and terrain."""
@@ -178,137 +233,204 @@ class T1Env(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Process actions before physics step."""
-        self.actions = actions.clone()
+        # Clip actions like Isaac Gym
+        self.actions = torch.clip(
+            actions, -self.cfg.clip_actions, self.cfg.clip_actions
+        )
+
+        # Update gait process (like Isaac Gym)
+        self.gait_process += self.gait_frequency * self.step_dt
+        self.gait_process = torch.fmod(self.gait_process, 1.0)  # Keep in [0, 1] range
 
     def _apply_action(self) -> None:
-        """Apply the processed actions to the robot."""
-        # Apply actions as joint position targets to leg joints only
+        """Apply the processed actions to the robot - match Isaac Gym exactly."""
+        # Calculate joint targets: default_pos + action_scale * actions (like Isaac Gym)
         if self.leg_dof_indices is not None and len(self.leg_dof_indices) > 0:
+            dof_targets = self.default_dof_pos + self.cfg.action_scale * self.actions
             self.robot.set_joint_position_target(
-                self.actions, joint_ids=self.leg_dof_indices
+                dof_targets, joint_ids=self.leg_dof_indices
             )
 
     def _get_observations(self) -> dict:
-        """Compute observations for the environment."""
-        # Base observations
+        """Compute observations for the environment - match Isaac Gym exactly."""
+        # Update filtered velocities (exponential moving average)
         base_lin_vel = self.robot.data.root_lin_vel_b
         base_ang_vel = self.robot.data.root_ang_vel_b
-        base_quat = self.robot.data.root_quat_w
 
-        # Joint states - use all joints if indices not ready
+        self.filtered_lin_vel[:] = (
+            base_lin_vel * self.cfg.filter_weight
+            + self.filtered_lin_vel * (1.0 - self.cfg.filter_weight)
+        )
+        self.filtered_ang_vel[:] = (
+            base_ang_vel * self.cfg.filter_weight
+            + self.filtered_ang_vel * (1.0 - self.cfg.filter_weight)
+        )
+
+        # Projected gravity (gravity in robot frame)
+        base_quat = self.robot.data.root_quat_w
+        self.projected_gravity[:] = self._quat_rotate_inverse(
+            base_quat, self.gravity_vec
+        )
+
+        # Joint states
         if self.leg_dof_indices is not None:
             joint_pos = self.robot.data.joint_pos[:, self.leg_dof_indices]
             joint_vel = self.robot.data.joint_vel[:, self.leg_dof_indices]
+            # Use pre-computed default positions
+            default_joint_pos = self.default_dof_pos
         else:
-            # Use first 12 joints as default (assumes leg joints are first)
             joint_pos = self.robot.data.joint_pos[:, :12]
             joint_vel = self.robot.data.joint_vel[:, :12]
+            default_joint_pos = self.default_dof_pos
 
-        # Commands - all 3 commands (x,y linear velocity + angular velocity)
-        commands = self.commands
+        # Gait information (2D)
+        gait_cos = torch.cos(2 * torch.pi * self.gait_process).unsqueeze(-1)
+        gait_sin = torch.sin(2 * torch.pi * self.gait_process).unsqueeze(-1)
 
-        # Concatenate observations
+        # Commands scaling
+        commands_scale = torch.tensor(
+            [
+                self.cfg.lin_vel_normalization,
+                self.cfg.lin_vel_normalization,
+                self.cfg.ang_vel_normalization,
+            ],
+            device=self.device,
+        )
+
+        # Isaac Gym observation structure: 47 elements
+        # 3 (projected_gravity) + 3 (base_ang_vel) + 3 (commands) + 2 (gait) + 12 (joint_pos) + 12 (joint_vel) + 12 (actions) = 47
         obs = torch.cat(
             [
-                base_lin_vel,  # 3
-                base_ang_vel,  # 3
-                base_quat,  # 4
-                joint_pos,  # 12
-                joint_vel,  # 12
-                commands,  # 3
-                self.actions,  # 12 (previous actions)
+                self.projected_gravity * self.cfg.gravity_normalization,  # 3
+                base_ang_vel * self.cfg.ang_vel_normalization,  # 3
+                self.commands[:, :3] * commands_scale,  # 3
+                gait_cos,  # 1
+                gait_sin,  # 1
+                (joint_pos - default_joint_pos) * self.cfg.dof_pos_normalization,  # 12
+                joint_vel * self.cfg.dof_vel_normalization,  # 12
+                self.actions,  # 12
             ],
             dim=-1,
         )
-        # Total: 3 + 3 + 4 + 12 + 12 + 3 + 12 = 49 ✓
-
-        # Add noise if specified
-        if hasattr(self.cfg, "noise_scale_vec"):
-            obs += torch.randn_like(obs) * self.cfg.noise_scale_vec.to(obs.device)
+        # Total: 3 + 3 + 3 + 1 + 1 + 12 + 12 + 12 = 47 ✓
 
         observations = {"policy": obs}
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
-        """Compute reward for the current step."""
-        # Linear velocity tracking reward
-        lin_vel_error = torch.sum(
-            torch.square(self.commands[:, :2] - self.robot.data.root_lin_vel_b[:, :2]),
-            dim=1,
-        )
-        lin_vel_reward = (
-            torch.exp(-lin_vel_error / 0.25) * self.cfg.lin_vel_reward_scale
-        )
+        """Compute reward for the current step - match Isaac Gym implementation."""
+        total_reward = torch.zeros(self.num_envs, device=self.device)
 
-        # Angular velocity tracking reward - use the angular command (third element)
-        ang_vel_error = torch.square(
-            self.commands[:, 2] - self.robot.data.root_ang_vel_b[:, 2]
+        # Survival reward
+        survival_rew = self.cfg.survival_reward_scale
+        total_reward += survival_rew
+
+        # Linear velocity tracking rewards (X and Y separately like Isaac Gym)
+        lin_vel_x_error = torch.square(
+            self.commands[:, 0] - self.filtered_lin_vel[:, 0]
         )
-        ang_vel_reward = (
-            torch.exp(-ang_vel_error / 0.25) * self.cfg.ang_vel_reward_scale
+        lin_vel_x_rew = (
+            torch.exp(-lin_vel_x_error / self.cfg.tracking_sigma)
+            * self.cfg.tracking_lin_vel_x_reward_scale
         )
+        total_reward += lin_vel_x_rew
+
+        lin_vel_y_error = torch.square(
+            self.commands[:, 1] - self.filtered_lin_vel[:, 1]
+        )
+        lin_vel_y_rew = (
+            torch.exp(-lin_vel_y_error / self.cfg.tracking_sigma)
+            * self.cfg.tracking_lin_vel_y_reward_scale
+        )
+        total_reward += lin_vel_y_rew
+
+        # Angular velocity tracking reward
+        ang_vel_error = torch.square(self.commands[:, 2] - self.filtered_ang_vel[:, 2])
+        ang_vel_rew = (
+            torch.exp(-ang_vel_error / self.cfg.tracking_sigma)
+            * self.cfg.tracking_ang_vel_reward_scale
+        )
+        total_reward += ang_vel_rew
+
+        # Base height penalty
+        base_height = self.robot.data.root_pos_w[:, 2]
+        height_error = torch.square(base_height - self.cfg.base_height_target)
+        height_penalty = height_error * self.cfg.base_height_reward_scale
+        total_reward += height_penalty
+
+        # Orientation penalty (keep robot upright)
+        orientation_penalty = (
+            torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
+            * self.cfg.orientation_reward_scale
+        )
+        total_reward += orientation_penalty
 
         # Torque penalty
         torque_penalty = (
             torch.sum(torch.square(self.robot.data.applied_torque), dim=1)
-            * self.cfg.torque_reward_scale
+            * self.cfg.torques_reward_scale
         )
+        total_reward += torque_penalty
 
-        # Joint acceleration penalty
+        # DOF velocity penalty
         if self.leg_dof_indices is not None:
-            joint_acc = (
-                self.robot.data.joint_vel[:, self.leg_dof_indices] - self.last_joint_vel
-            ) / self.step_dt
+            joint_vel = self.robot.data.joint_vel[:, self.leg_dof_indices]
         else:
-            # Use first 12 joints as fallback
-            joint_acc = (
-                self.robot.data.joint_vel[:, :12] - self.last_joint_vel
-            ) / self.step_dt
-        joint_acc_penalty = (
-            torch.sum(torch.square(joint_acc), dim=1)
-            * self.cfg.joint_accel_reward_scale
+            joint_vel = self.robot.data.joint_vel[:, :12]
+        dof_vel_penalty = (
+            torch.sum(torch.square(joint_vel), dim=1) * self.cfg.dof_vel_reward_scale
         )
+        total_reward += dof_vel_penalty
+
+        # DOF acceleration penalty
+        joint_acc = (joint_vel - self.last_dof_vel) / self.step_dt
+        dof_acc_penalty = (
+            torch.sum(torch.square(joint_acc), dim=1) * self.cfg.dof_acc_reward_scale
+        )
+        total_reward += dof_acc_penalty
 
         # Action rate penalty
         action_rate_penalty = (
             torch.sum(torch.square(self.actions - self.last_actions), dim=1)
             * self.cfg.action_rate_reward_scale
         )
+        total_reward += action_rate_penalty
 
-        # Orientation penalty (keep robot upright)
-        base_quat = self.robot.data.root_quat_w
-        up_proj = 2 * (
-            base_quat[:, 1] * base_quat[:, 3] + base_quat[:, 0] * base_quat[:, 2]
+        # Linear velocity Z penalty (discourage jumping/falling)
+        lin_vel_z_penalty = (
+            torch.square(self.filtered_lin_vel[:, 2]) * self.cfg.lin_vel_z_reward_scale
         )
-        orientation_penalty = (
-            torch.square(up_proj) * self.cfg.flat_orientation_reward_scale
+        total_reward += lin_vel_z_penalty
+
+        # Angular velocity XY penalty (discourage roll/pitch)
+        ang_vel_xy_penalty = (
+            torch.sum(torch.square(self.robot.data.root_ang_vel_b[:, :2]), dim=1)
+            * self.cfg.ang_vel_xy_reward_scale
         )
+        total_reward += ang_vel_xy_penalty
 
-        # Sum all rewards
-        total_reward = (
-            lin_vel_reward
-            + ang_vel_reward
-            + torque_penalty
-            + joint_acc_penalty
-            + action_rate_penalty
-            + orientation_penalty
-        )
+        # Collision penalty (undesired contacts) - simplified for now
+        # TODO: Implement proper contact force detection in Isaac Lab
+        collision_penalty = torch.zeros(self.num_envs, device=self.device)
+        total_reward += collision_penalty
 
-        # Store for tracking
-        self.episode_sums["track_lin_vel_xy_exp"] += lin_vel_reward
-        self.episode_sums["track_ang_vel_z_exp"] += ang_vel_reward
-        self.episode_sums["dof_torques_l2"] += -torque_penalty
-        self.episode_sums["dof_acc_l2"] += -joint_acc_penalty
-        self.episode_sums["action_rate_l2"] += -action_rate_penalty
-        self.episode_sums["flat_orientation_l2"] += -orientation_penalty
+        # Store episode sums for tracking
+        self.episode_sums["survival"] += survival_rew
+        self.episode_sums["tracking_lin_vel_x"] += lin_vel_x_rew
+        self.episode_sums["tracking_lin_vel_y"] += lin_vel_y_rew
+        self.episode_sums["tracking_ang_vel"] += ang_vel_rew
+        self.episode_sums["base_height"] += -height_penalty
+        self.episode_sums["orientation"] += -orientation_penalty
+        self.episode_sums["torques"] += -torque_penalty
+        self.episode_sums["dof_vel"] += -dof_vel_penalty
+        self.episode_sums["dof_acc"] += -dof_acc_penalty
+        self.episode_sums["action_rate"] += -action_rate_penalty
 
-        # Update tracking variables
-        if self.leg_dof_indices is not None:
-            self.last_joint_vel = self.robot.data.joint_vel[
-                :, self.leg_dof_indices
-            ].clone()
-        else:
-            self.last_joint_vel = self.robot.data.joint_vel[:, :12].clone()
+        # Update previous states
+        self.last_dof_vel = joint_vel.clone()
+        self.last_root_vel = torch.cat(
+            [self.robot.data.root_lin_vel_w, self.robot.data.root_ang_vel_w], dim=1
+        ).clone()
         self.last_actions = self.actions.clone()
 
         return total_reward
@@ -381,23 +503,37 @@ class T1Env(DirectRLEnv):
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
         # Reset tracking variables
-        if not hasattr(self, "last_joint_vel") or self.leg_dof_indices is None:
+        if not hasattr(self, "last_dof_vel") or self.leg_dof_indices is None:
             # Initialize with safe defaults if joint indices not ready yet
             if self.leg_dof_indices is not None:
-                self.last_joint_vel = torch.zeros(
+                self.last_dof_vel = torch.zeros(
                     (self.num_envs, len(self.leg_dof_indices)), device=self.device
                 )
             else:
-                self.last_joint_vel = torch.zeros(
+                self.last_dof_vel = torch.zeros(
                     (self.num_envs, 12), device=self.device
                 )  # Default to 12 leg joints
         if not hasattr(self, "last_actions"):
             self.last_actions = torch.zeros(
                 (self.num_envs, self.cfg.action_space), device=self.device
             )
+        if not hasattr(self, "last_root_vel"):
+            self.last_root_vel = torch.zeros((self.num_envs, 6), device=self.device)
 
-        self.last_joint_vel[env_ids] = 0.0
+        self.last_dof_vel[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0
+        self.last_root_vel[env_ids] = 0.0
+
+        # Reset velocity filters
+        self.filtered_lin_vel[env_ids] = 0.0
+        self.filtered_ang_vel[env_ids] = 0.0
+
+        # Reset gait tracking
+        self.gait_process[env_ids] = 0.0
+        # Randomize gait frequency (1.0 to 2.0 Hz like Isaac Gym)
+        self.gait_frequency[env_ids] = 1.0 + torch.rand(
+            len(env_ids), device=self.device
+        )
 
         # Reset episode tracking
         for key in self.episode_sums.keys():

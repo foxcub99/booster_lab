@@ -13,12 +13,6 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
-
-##
-# Pre-defined configs
-##
-from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG  # isort: skip
 
 
 @configclass
@@ -26,20 +20,20 @@ class T1EnvCfg(DirectRLEnvCfg):
     """Configuration for the T1 humanoid locomotion environment."""
 
     # env
-    episode_length_s = 5.0
-    decimation = 2
+    episode_length_s = 30.0  # Match Isaac Gym's episode length
+    decimation = 10  # Match Isaac Gym's decimation
     num_actions = 12
-    num_observations = 49  # Updated to match actual observation size
+    num_observations = 47  # Match Isaac Gym: 3+3+3+2+12+12+12 = 47
     num_states = 0  # No asymmetric observations for now
 
     # Define the action and observation spaces properly
     action_space = 12
-    observation_space = 49  # Updated to match actual observation size
+    observation_space = 47  # Match Isaac Gym: 3+3+3+2+12+12+12 = 47
     state_space = 0
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 120,  # 120 Hz (decimation=2 gives effective 60 Hz)
+        dt=1 / 500,  # 500 Hz to match Isaac Gym's 0.002 timestep
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -54,7 +48,7 @@ class T1EnvCfg(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=4096, env_spacing=2.5, replicate_physics=True
+        num_envs=4096, env_spacing=4.0, replicate_physics=True
     )
 
     # terrain
@@ -62,7 +56,7 @@ class T1EnvCfg(DirectRLEnvCfg):
         prim_path="/World/ground",
         terrain_type="plane",
         collision_group=-1,
-        env_spacing=1.0,  # Add environment spacing for grid-like origins
+        env_spacing=4.0,  # Add environment spacing for grid-like origins
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -137,22 +131,72 @@ class T1EnvCfg(DirectRLEnvCfg):
                 ],
                 effort_limit=400.0,
                 velocity_limit=30.0,
-                stiffness=80.0,
-                damping=2.0,
+                stiffness={
+                    ".*_Hip_.*": 200.0,
+                    ".*_Knee_.*": 200.0,
+                    ".*_Ankle_.*": 50.0,
+                },
+                damping={
+                    ".*_Hip_.*": 5.0,
+                    ".*_Knee_.*": 5.0,
+                    ".*_Ankle_.*": 1.0,
+                },
             ),
         },
         soft_joint_pos_limit_factor=0.9,
     )
 
-    # reward scales
-    lin_vel_reward_scale = 1.0
-    ang_vel_reward_scale = 0.5
-    torque_reward_scale = -0.0002
-    joint_accel_reward_scale = -2.5e-7
-    action_rate_reward_scale = -0.01
-    feet_air_time_reward_scale = 1.0
-    undersired_contact_reward_scale = -1.0
-    flat_orientation_reward_scale = -1.0
+    # reward scales (matching Isaac Gym values exactly)
+    survival_reward_scale = 0.25
+    tracking_lin_vel_x_reward_scale = 1.0
+    tracking_lin_vel_y_reward_scale = 1.0
+    tracking_ang_vel_reward_scale = 0.5
+    base_height_reward_scale = -20.0
+    orientation_reward_scale = -5.0
+    torques_reward_scale = -2.0e-4
+    torque_tiredness_reward_scale = -1.0e-2
+    power_reward_scale = -2.0e-3
+    lin_vel_z_reward_scale = -2.0
+    ang_vel_xy_reward_scale = -0.2
+    dof_vel_reward_scale = -1.0e-4
+    dof_acc_reward_scale = -1.0e-7
+    root_acc_reward_scale = -1.0e-4
+    action_rate_reward_scale = -1.0
+    dof_pos_limits_reward_scale = -1.0
+    dof_vel_limits_reward_scale = 0.0
+    torque_limits_reward_scale = 0.0
+    collision_reward_scale = -1.0
+    feet_slip_reward_scale = -0.1
+    feet_vel_z_reward_scale = 0.0
+    feet_yaw_diff_reward_scale = -1.0
+    feet_yaw_mean_reward_scale = -1.0
+    feet_roll_reward_scale = -0.1
+    feet_distance_reward_scale = -1.0
+    feet_swing_reward_scale = 3.0
+
+    # normalization
+    gravity_normalization = 1.0
+    lin_vel_normalization = 1.0
+    ang_vel_normalization = 1.0
+    dof_pos_normalization = 1.0
+    dof_vel_normalization = 0.1
+    filter_weight = 0.1
+    push_force_normalization = 0.1
+    push_torque_normalization = 0.5
+    clip_actions = 1.0  # control parameters (matching Isaac Gym)
+    action_scale = 1.0
+    clip_actions = 1.0
+
+    # tracking
+    tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
+    base_height_target = 0.68
+    soft_dof_pos_limit = 1.0  # percentage of urdf limits
+    soft_dof_vel_limit = 1.0
+    soft_torque_limit = 1.0
+
+    # gait parameters
+    swing_period = 0.2
+    feet_distance_ref = 0.2
 
     # command ranges
     max_command_speed = 1.5
