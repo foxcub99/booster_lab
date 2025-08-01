@@ -21,7 +21,7 @@ class T1EnvCfg(DirectRLEnvCfg):
 
     # env
     episode_length_s = 30.0  # Match Isaac Gym's episode length
-    decimation = 10  # Match Isaac Gym's decimation
+    decimation = 1  # Match Isaac Gym's decimation
     num_actions = 12
     num_observations = 47  # Match Isaac Gym: 3+3+3+2+12+12+12 = 47
     num_states = 0  # No asymmetric observations for now
@@ -41,9 +41,13 @@ class T1EnvCfg(DirectRLEnvCfg):
             static_friction=1.0,
             dynamic_friction=1.0,
         ),
-        # physx=sim_utils.PhysxCfg(
-        #     solver_type=1,  # TGS
-        # ),
+        physx=sim_utils.PhysxCfg(
+            solver_type=1,  # TGS
+            max_position_iteration_count=4,  # Match Isaac Gym's position iteration count
+            max_velocity_iteration_count=1,  # Match Isaac Gym's velocity iteration count
+            bounce_threshold_velocity=2.0,  # Match Isaac Gym's bounce threshold
+            gpu_max_rigid_contact_count=8388608,  # Match Isaac Gym's GPU contact count
+        ),
     )
 
     # scene
@@ -56,7 +60,7 @@ class T1EnvCfg(DirectRLEnvCfg):
         prim_path="/World/ground",
         terrain_type="plane",
         collision_group=-1,
-        env_spacing=4.0,  # Add environment spacing for grid-like origins
+        env_spacing=4.0,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -84,7 +88,7 @@ class T1EnvCfg(DirectRLEnvCfg):
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=True,
                 solver_position_iteration_count=4,
-                solver_velocity_iteration_count=0,
+                solver_velocity_iteration_count=1,
                 sleep_threshold=0.005,
                 stabilization_threshold=0.001,
             ),
@@ -154,25 +158,25 @@ class T1EnvCfg(DirectRLEnvCfg):
     base_height_reward_scale = -20.0
     orientation_reward_scale = -5.0
     torques_reward_scale = -2.0e-4
-    torque_tiredness_reward_scale = -1.0e-2
-    power_reward_scale = -2.0e-3
+    # torque_tiredness_reward_scale = -1.0e-2
+    # power_reward_scale = -2.0e-3
     lin_vel_z_reward_scale = -2.0
     ang_vel_xy_reward_scale = -0.2
     dof_vel_reward_scale = -1.0e-4
     dof_acc_reward_scale = -1.0e-7
-    root_acc_reward_scale = -1.0e-4
-    action_rate_reward_scale = -1.0
-    dof_pos_limits_reward_scale = -1.0
-    dof_vel_limits_reward_scale = 0.0
-    torque_limits_reward_scale = 0.0
-    collision_reward_scale = -1.0
-    feet_slip_reward_scale = -0.1
-    feet_vel_z_reward_scale = 0.0
-    feet_yaw_diff_reward_scale = -1.0
-    feet_yaw_mean_reward_scale = -1.0
-    feet_roll_reward_scale = -0.1
-    feet_distance_reward_scale = -1.0
-    feet_swing_reward_scale = 3.0
+    # root_acc_reward_scale = -1.0e-4
+    # action_rate_reward_scale = -1.0
+    # dof_pos_limits_reward_scale = -1.0
+    # dof_vel_limits_reward_scale = 0.0
+    # torque_limits_reward_scale = 0.0
+    # collision_reward_scale = -1.0
+    # feet_slip_reward_scale = -0.1
+    # feet_vel_z_reward_scale = 0.0
+    # feet_yaw_diff_reward_scale = -1.0
+    # feet_yaw_mean_reward_scale = -1.0
+    # feet_roll_reward_scale = -0.1
+    # feet_distance_reward_scale = -1.0
+    # feet_swing_reward_scale = 3.0
 
     # normalization
     gravity_normalization = 1.0
@@ -181,29 +185,32 @@ class T1EnvCfg(DirectRLEnvCfg):
     dof_pos_normalization = 1.0
     dof_vel_normalization = 0.1
     filter_weight = 0.1
-    push_force_normalization = 0.1
-    push_torque_normalization = 0.5
     clip_actions = 1.0  # control parameters (matching Isaac Gym)
     action_scale = 1.0
-    clip_actions = 1.0
+
+    # randomization
+    # push_force_normalization = 0.1 # wrong, shoudl be randomization
+    # push_torque_normalization = 0.5 # wrong, should be randomization
 
     # tracking
     tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
     base_height_target = 0.68
-    soft_dof_pos_limit = 1.0  # percentage of urdf limits
-    soft_dof_vel_limit = 1.0
-    soft_torque_limit = 1.0
+    # soft_dof_pos_limit = 1.0  # percentage of urdf limits
+    # soft_dof_vel_limit = 1.0
+    # soft_torque_limit = 1.0
 
     # gait parameters
-    swing_period = 0.2
-    feet_distance_ref = 0.2
+    # swing_period = 0.2
+    # feet_distance_ref = 0.2
 
     # command ranges
-    max_command_speed = 1.5
-    max_command_angular_speed = 1.0
+    max_absolute_command_vel_x = 1.0  # Match Isaac Gym's command speed range
+    max_absolute_command_vel_y = 1.0  # Match Isaac Gym's command speed range
+    max_absolute_command_angular_speed = 1.0  # Match Isaac Gym's command angular speed
 
-    # contact body names for reward calculation (use actual URDF link names)
+    # contact body names for reward calculation (use actual USD link names)
     contact_bodies = ["left_foot_link", "right_foot_link"]
 
     # termination conditions
-    max_cart_pos = 3.0
+    termination_height = 0.45
+    termination_velocity = 50  # Match Isaac Gym's termination velocity

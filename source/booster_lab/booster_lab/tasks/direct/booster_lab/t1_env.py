@@ -390,9 +390,8 @@ class T1Env(DirectRLEnv):
         total_reward += dof_acc_penalty
 
         # Action rate penalty
-        action_rate_penalty = (
-            torch.sum(torch.square(self.actions - self.last_actions), dim=1)
-            * self.cfg.action_rate_reward_scale
+        action_rate_penalty = torch.sum(
+            torch.square(self.last_actions - self.actions), dim=1
         )
         total_reward += action_rate_penalty
 
@@ -453,10 +452,18 @@ class T1Env(DirectRLEnv):
         )
 
         fallen = (
-            (base_height < 0.3) | (torch.abs(roll) > 1.0) | (torch.abs(pitch) > 1.0)
+            (base_height < self.cfg.termination_height)
+            | (torch.abs(roll) > 1.0)
+            | (torch.abs(pitch) > 1.0)  # Match Isaac Gym termination height
         )
 
-        died = fallen
+        # Check if robot is unstable (e.g., too much velocity)
+        unstable = (
+            torch.norm(self.robot.data.root_lin_vel_w, dim=1)
+            > self.cfg.termination_velocity
+        )
+
+        died = fallen | unstable
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -548,17 +555,17 @@ class T1Env(DirectRLEnv):
         self.commands[env_ids, 0] = (
             (torch.rand(len(env_ids), device=self.device) - 0.5)
             * 2
-            * self.cfg.max_command_speed
+            * self.cfg.max_absolute_command_vel_x
         )
         self.commands[env_ids, 1] = (
             (torch.rand(len(env_ids), device=self.device) - 0.5)
             * 2
-            * self.cfg.max_command_speed
+            * self.cfg.max_absolute_command_vel_y
         )
 
         # Random angular velocity command
         self.commands[env_ids, 2] = (
             (torch.rand(len(env_ids), device=self.device) - 0.5)
             * 2
-            * self.cfg.max_command_angular_speed
+            * self.cfg.max_absolute_command_angular_speed
         )
