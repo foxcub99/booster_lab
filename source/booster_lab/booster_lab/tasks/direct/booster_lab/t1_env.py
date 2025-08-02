@@ -14,6 +14,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.terrains import TerrainImporter
+from isaaclab.sensors import ContactSensor
 
 if TYPE_CHECKING:
     from .t1_env_cfg import T1EnvCfg
@@ -28,14 +29,24 @@ class T1Env(DirectRLEnv):
         """Initialize the T1 environment."""
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Joint and body indices will be set after scene is created
-        self.leg_dof_indices = None
+        # Joint and body indices # gym didn't actuate anything else
+        legs_indices = self.robot.actuators["legs"].joint_indices
+        self.dof_indices = torch.cat([legs_indices])
+        self.leg_dof_indices = legs_indices
+
         self.contact_body_indices = None
-        self.penalized_contact_indices = None
 
         # Velocity filtering (matching Isaac Gym)
         self.filtered_lin_vel = torch.zeros(self.num_envs, 3, device=self.device)
         self.filtered_ang_vel = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # for Root Acceleration calculation
+        self.last_filtered_lin_vel = torch.zeros(self.num_envs, 3, device=self.device)
+        self.last_filtered_ang_vel = torch.zeros(self.num_envs, 3, device=self.device)
+
+        # for foot slippage
+        self.feet_pos = torch.zeros(self.num_envs, 2, 3, device=self.device)
+        self.last_feet_pos = torch.zeros(self.num_envs, 2, 3, device=self.device)
 
         # Gait tracking (matching Isaac Gym)
         self.gait_frequency = (
@@ -100,38 +111,22 @@ class T1Env(DirectRLEnv):
             )
             return
 
-        # Based on the actual URDF joint names
-        self.leg_dof_names = [
-            "Left_Hip_Pitch",
-            "Left_Hip_Roll",
-            "Left_Hip_Yaw",
-            "Left_Knee_Pitch",
-            "Left_Ankle_Pitch",
-            "Left_Ankle_Roll",
-            "Right_Hip_Pitch",
-            "Right_Hip_Roll",
-            "Right_Hip_Yaw",
-            "Right_Knee_Pitch",
-            "Right_Ankle_Pitch",
-            "Right_Ankle_Roll",
-        ]
+        # body indices
+        # self.body_indices = []
+        # for name in self.cfg.bodies:
+        #     try:
+        #         # Use find_bodies method which returns (indices, names)
+        #         idx, _ = self.robot.find_bodies(name)
+        #         if len(idx) > 0:
+        #             self.body_indices.append(idx[0])
+        #         else:
+        #             print(f"Warning: Body {name} not found in robot")
+        #     except Exception as e:
+        #         print(f"Warning: Error finding body {name}: {e}")
 
-        self.leg_dof_indices = []
-        for name in self.leg_dof_names:
-            try:
-                # Use find_joints method which returns (indices, names)
-                idx, _ = self.robot.find_joints(name)
-                if len(idx) > 0:
-                    self.leg_dof_indices.append(idx[0])
-                else:
-                    print(f"Warning: Joint {name} not found in robot")
-            except Exception as e:
-                print(f"Warning: Error finding joint {name}: {e}")
-                return  # Exit early if there are issues
-
-        self.leg_dof_indices = torch.tensor(
-            self.leg_dof_indices, dtype=torch.long, device=self.device
-        )
+        # self.dof_indices = torch.tensor(
+        #     self.robot.data.joint_names, dtype=torch.long, device=self.device
+        # )
 
         # Contact body indices for feet
         self.contact_body_indices = []
@@ -148,43 +143,6 @@ class T1Env(DirectRLEnv):
 
         self.contact_body_indices = torch.tensor(
             self.contact_body_indices, dtype=torch.long, device=self.device
-        )
-
-        # Contact body indices (penalized contacts)
-        self.penalized_contact_names = []
-        penalized_names = [
-            "Trunk",
-            "H1",
-            "H2",
-            "AL",
-            "AR",
-            "Waist",
-            "Hip",
-            "Shank",
-            "Ankle",
-        ]
-        body_names = self.robot.body_names
-        for name in penalized_names:
-            self.penalized_contact_names.extend([s for s in body_names if name in s])
-
-        self.penalized_contact_indices = []
-        for name in self.penalized_contact_names:
-            try:
-                idx, _ = self.robot.find_bodies(name)
-                if len(idx) > 0:
-                    self.penalized_contact_indices.append(idx[0])
-            except Exception as e:
-                print(f"Warning: Error finding penalized contact body {name}: {e}")
-
-        if len(self.penalized_contact_indices) > 0:
-            self.penalized_contact_indices = torch.tensor(
-                self.penalized_contact_indices, dtype=torch.long, device=self.device
-            )
-        else:
-            self.penalized_contact_indices = None
-
-        print(
-            f"Successfully initialized {len(self.leg_dof_indices)} joint indices, {len(self.contact_body_indices)} contact body indices, and {len(self.penalized_contact_indices) if self.penalized_contact_indices is not None else 0} penalized contact indices"
         )
 
         # Initialize last_dof_vel with correct size now that we know the number of DOFs
@@ -220,10 +178,17 @@ class T1Env(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
+        # Add collision sensors
+        self.collision_sensors = ContactSensor(self.cfg.collision_sensors)
+        self.scene.sensors["collision_sensors"] = self.collision_sensors
+
+        self.foot_contact_sensors = ContactSensor(self.cfg.foot_contact_sensors)
+        self.scene.sensors["foot_contact_sensors"] = self.foot_contact_sensors
+
     def reset(self, seed=None, options=None):
         """Override reset to initialize joint indices after first reset."""
         # Initialize joint indices before any reset logic if not already done
-        if self.leg_dof_indices is None:
+        if self.contact_body_indices is None:
             self._get_joint_indices()
 
         # Call parent reset
@@ -250,10 +215,10 @@ class T1Env(DirectRLEnv):
     def _apply_action(self) -> None:
         """Apply the processed actions to the robot - match Isaac Gym exactly."""
         # Calculate joint targets: default_pos + action_scale * actions (like Isaac Gym)
-        if self.leg_dof_indices is not None and len(self.leg_dof_indices) > 0:
+        if self.dof_indices is not None and len(self.dof_indices) > 0:
             dof_targets = self.default_dof_pos + self.cfg.action_scale * self.actions
             self.robot.set_joint_position_target(
-                dof_targets, joint_ids=self.leg_dof_indices
+                dof_targets, joint_ids=self.dof_indices
             )
 
     def _get_observations(self) -> dict:
@@ -262,10 +227,12 @@ class T1Env(DirectRLEnv):
         base_lin_vel = self.robot.data.root_lin_vel_b
         base_ang_vel = self.robot.data.root_ang_vel_b
 
+        self.last_filtered_lin_vel = self.filtered_lin_vel.clone()
         self.filtered_lin_vel[:] = (
             base_lin_vel * self.cfg.filter_weight
             + self.filtered_lin_vel * (1.0 - self.cfg.filter_weight)
         )
+        self.last_filtered_ang_vel = self.filtered_ang_vel.clone()
         self.filtered_ang_vel[:] = (
             base_ang_vel * self.cfg.filter_weight
             + self.filtered_ang_vel * (1.0 - self.cfg.filter_weight)
@@ -277,16 +244,14 @@ class T1Env(DirectRLEnv):
             base_quat, self.gravity_vec
         )
 
+        # Update feet positions
+        self.last_feet_pos = self.feet_pos.clone()
+        self.feet_pos = self.robot.data.body_state_w[:, self.contact_body_indices, :3]
+
         # Joint states
-        if self.leg_dof_indices is not None:
-            joint_pos = self.robot.data.joint_pos[:, self.leg_dof_indices]
-            joint_vel = self.robot.data.joint_vel[:, self.leg_dof_indices]
-            # Use pre-computed default positions
-            default_joint_pos = self.default_dof_pos
-        else:
-            joint_pos = self.robot.data.joint_pos[:, :12]
-            joint_vel = self.robot.data.joint_vel[:, :12]
-            default_joint_pos = self.default_dof_pos
+        joint_pos = self.robot.data.joint_pos[:, self.dof_indices]
+        joint_vel = self.robot.data.joint_vel[:, self.dof_indices]
+        default_joint_pos = self.default_dof_pos
 
         # Gait information (2D)
         gait_cos = torch.cos(2 * torch.pi * self.gait_process).unsqueeze(-1)
@@ -359,9 +324,11 @@ class T1Env(DirectRLEnv):
         height_penalty = height_error * self.cfg.base_height_reward_scale
         total_reward += height_penalty
 
-        # Collision penalty (undesired contacts) - simplified for now
-        # TODO: Implement proper contact force detection in Isaac Lab
-        collision_penalty = torch.zeros(self.num_envs, device=self.device)
+        collision_body_violations = (
+            torch.norm(self.collision_sensors.data.net_forces_w, dim=-1) > 1.0
+        )
+        num_collision_violations = collision_body_violations.sum(dim=-1)
+        collision_penalty = num_collision_violations * self.cfg.collision_reward_scale
         total_reward += collision_penalty
 
         lin_vel_z_penalty = (
@@ -369,7 +336,6 @@ class T1Env(DirectRLEnv):
         )
         total_reward += lin_vel_z_penalty
 
-        # TODO check root_ang_vel_b is correct for xy
         ang_vel_xy_penalty = (
             torch.sum(torch.square(self.robot.data.root_ang_vel_b[:, :2]), dim=-1)
             * self.cfg.ang_vel_xy_reward_scale
@@ -389,21 +355,29 @@ class T1Env(DirectRLEnv):
         )
         total_reward += torque_penalty
 
-        # DOF velocity penalty
         dof_vel = self.robot.data.joint_vel
         dof_vel_penalty = (
             torch.sum(torch.square(dof_vel), dim=-1) * self.cfg.dof_vel_reward_scale
         )
         total_reward += dof_vel_penalty
 
-        # DOF acceleration penalty
         joint_acc = (self.last_dof_vel - dof_vel) / self.step_dt
         dof_acc_penalty = (
             torch.sum(torch.square(joint_acc), dim=-1) * self.cfg.dof_acc_reward_scale
         )
         total_reward += dof_acc_penalty
 
-        # TODO missing root acc
+        root_lin_acc = (
+            self.last_filtered_lin_vel - self.filtered_lin_vel
+        ) / self.step_dt
+        root_ang_acc = (
+            self.last_filtered_ang_vel - self.filtered_ang_vel
+        ) / self.step_dt
+        root_acc_penalty = (
+            torch.sum(torch.square(root_lin_acc), dim=-1)
+            + torch.sum(torch.square(root_ang_acc), dim=-1)
+        ) * self.cfg.root_acc_reward_scale
+        total_reward += root_acc_penalty
 
         action_rate_penalty = (
             torch.sum(torch.square(self.last_actions - self.actions), dim=-1)
@@ -411,34 +385,48 @@ class T1Env(DirectRLEnv):
         )
         total_reward += action_rate_penalty
 
-        # TODO
-        # DOF position limits penalty
-        if self.leg_dof_indices is not None:
-            joint_pos = self.robot.data.joint_pos[:, self.leg_dof_indices]
-            # Get joint limits for the leg joints
-            # For now, use approximate limits based on URDF
-            lower_limits = torch.tensor(
-                [-2.8, -0.8, -1.5, 0.0, -1.5, -0.4] * 2, device=self.device
-            )
-            upper_limits = torch.tensor(
-                [2.8, 0.8, 1.5, 2.5, 1.5, 0.4] * 2, device=self.device
-            )
+        # DOF position limits penalty - fixed shape handling
+        joint_pos_limits_lower = self.robot.data.joint_pos_limits[
+            0, :, 0
+        ]  # [num_joints]
+        joint_pos_limits_upper = self.robot.data.joint_pos_limits[
+            0, :, 1
+        ]  # [num_joints]
 
-            lower_soft = lower_limits + 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
-                upper_limits - lower_limits
-            )
-            upper_soft = upper_limits - 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
-                upper_limits - lower_limits
-            )
+        lower = joint_pos_limits_lower + 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
+            joint_pos_limits_upper - joint_pos_limits_lower
+        )
 
-            dof_pos_limits_penalty = (
-                torch.sum(
-                    ((joint_pos < lower_soft) | (joint_pos > upper_soft)).float(),
-                    dim=-1,
-                )
-                * self.cfg.dof_pos_limits_reward_scale
+        upper = joint_pos_limits_upper - 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
+            joint_pos_limits_upper - joint_pos_limits_lower
+        )
+
+        dof_pos_limits_penalty = (
+            torch.sum(
+                (
+                    (self.robot.data.joint_pos < lower)
+                    | (self.robot.data.joint_pos > upper)
+                ).float(),
+                dim=-1,
             )
-            total_reward += dof_pos_limits_penalty
+            * self.cfg.dof_pos_limits_reward_scale
+        )
+        total_reward += dof_pos_limits_penalty
+
+        # lower_soft = lower_limits + 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
+        #     upper_limits - lower_limits
+        # )
+        # upper_soft = upper_limits - 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
+        #     upper_limits - lower_limits
+        # )
+
+        # dof_pos_limits_penalty = (
+        #     torch.sum(
+        #         ((joint_pos < lower_soft) | (joint_pos > upper_soft)).float(),
+        #         dim=-1,
+        #     )
+        #     * self.cfg.dof_pos_limits_reward_scale
+        # )
 
         # DOF velocity limits penalty TODO
         # if (
@@ -476,33 +464,28 @@ class T1Env(DirectRLEnv):
         #     total_reward += torque_limits_penalty
 
         # Torque tiredness penalty TODO
-        if (
-            hasattr(self.cfg, "torque_tiredness_reward_scale")
-            and self.cfg.torque_tiredness_reward_scale != 0
-        ):
-            torque_limit = 400.0
-            torque_tiredness_penalty = (
-                torch.sum(
-                    torch.square(self.robot.data.applied_torque / torque_limit).clamp(
-                        max=1.0
-                    ),
-                    dim=-1,
-                )
-                * self.cfg.torque_tiredness_reward_scale
-            )
-            total_reward += torque_tiredness_penalty
+        # there is no way to inherently get torque limits in isaac lab
+        # i could implement a difference between calculated and applied but it's a small scale
+        # total_reward += torque_tiredness_penalty
 
-        # Power penalty TODO
-        if hasattr(self.cfg, "power_reward_scale") and self.cfg.power_reward_scale != 0:
-            power_penalty = (
-                torch.sum(
-                    (self.robot.data.applied_torque * dof_vel).clamp(min=0.0), dim=-1
-                )
-                * self.cfg.power_reward_scale
-            )
-            total_reward += power_penalty
+        power_penalty = torch.sum(
+            (self.robot.data.applied_torque * self.robot.data.joint_vel).clip(min=0.0),
+            dim=-1,
+        )
+        total_reward += power_penalty
 
         # missed feet slip
+        feet_movement = torch.square(
+            torch.sum(((self.last_feet_pos - self.feet_pos) / self.step_dt), dim=-1)
+        )
+        feet_ground_contact = self.foot_contact_sensors.data.net_forces_w[:, :, 2] > 0.0
+        feet_slip = torch.sum(feet_movement * feet_ground_contact, dim=-1)
+        feet_slip_penalty = (
+            feet_slip
+            * self.cfg.feet_slip_reward_scale
+            * (self.episode_length_buf > 1).float()
+        )
+        total_reward += feet_slip_penalty
 
         # missed feet vel z
         # (disabled)

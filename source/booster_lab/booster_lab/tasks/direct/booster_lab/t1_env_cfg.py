@@ -12,6 +12,7 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
 
@@ -149,6 +150,33 @@ class T1EnvCfg(DirectRLEnvCfg):
         },
         soft_joint_pos_limit_factor=0.9,
     )
+
+    collision_sensors = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/(?:Trunk|H1|H2|AL|AR|Waist|Hip|Shank|Ankle).*",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        # filter_prim_paths_expr=[
+        #     "/World/envs/env_.*/Robot/(?:Trunk|H1|H2|AL|AR|Waist|Hip|Shank|Ankle).*",
+        # ],
+    )
+
+    foot_contact_sensors = ContactSensorCfg(
+        prim_path=f"/World/envs/env_.*/Robot/(?:left|right)_foot.*",
+        update_period=0.0,
+        history_length=1,
+        debug_vis=False,
+        # filter_prim_paths_expr=[
+        #     "/World/ground",
+        # ],
+    )
+    # note: turns out filtering with the ground isn't supported because it's not a rigid body?
+
+    # bodies list necessary to calculate foot slippage (contact doesn't have state)
+    foot_contact_bodies = [
+        "left_foot_link",
+        "right_foot_link",
+    ]
 
     # reward scales (matching Isaac Gym values exactly)
     survival_reward_scale = 0.25
