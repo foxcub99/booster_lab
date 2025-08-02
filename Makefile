@@ -15,6 +15,7 @@ help:
 	@echo   train [task]          - Train environment with SKRL (default: ${DEFAULT_TASK})
 	@echo   play [task]           - Play environment (default: ${DEFAULT_TASK})
 	@echo   view-logs             - View training logs in TensorBoard
+	@echo   view-recent-log       - View most recent training log in TensorBoard
 
 # Run command with IsaacLab prefix
 isaac:

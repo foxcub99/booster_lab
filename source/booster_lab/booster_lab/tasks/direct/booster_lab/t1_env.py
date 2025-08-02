@@ -9,11 +9,13 @@ from __future__ import annotations
 import math
 import torch
 from typing import TYPE_CHECKING
+from enum import Enum
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.terrains import TerrainImporter
+from isaaclab.utils.math import euler_xyz_from_quat
 from isaaclab.sensors import ContactSensor
 
 if TYPE_CHECKING:
@@ -73,6 +75,7 @@ class T1Env(DirectRLEnv):
         )
 
         # Default joint positions (matching Isaac Gym)
+        # TODO these may be redundant due to isaac property default_joint_pos
         self.default_dof_pos = torch.zeros(self.num_envs, 12, device=self.device)
         # Set defaults based on initial configuration (Hip_Pitch, Knee_Pitch, Ankle_Pitch)
         self.default_dof_pos[:, 0] = -0.2  # Left_Hip_Pitch
@@ -91,14 +94,27 @@ class T1Env(DirectRLEnv):
                 "tracking_lin_vel_y",
                 "tracking_ang_vel",
                 "base_height",
+                "collisions",
+                "lin_vel_z",
+                "ang_vel_xy",
                 "orientation",
                 "torques",
                 "dof_vel",
                 "dof_acc",
+                "root_acc",
                 "action_rate",
+                "dof_pos_limits",
+                "power",
+                "feet_slip",
+                "feet_roll",
+                "feet_yaw_diff",
+                "feet_yaw_mean",
+                "feet_distance",
+                "feet_swing",
             ]
         }
 
+    # TODO, there's probably a better way to do everything in this function
     def _get_joint_indices(self):
         """Get joint indices for easier access."""
         # Check if robot is properly initialized
@@ -110,23 +126,6 @@ class T1Env(DirectRLEnv):
                 "Warning: Robot PhysX view not yet initialized, deferring joint indexing"
             )
             return
-
-        # body indices
-        # self.body_indices = []
-        # for name in self.cfg.bodies:
-        #     try:
-        #         # Use find_bodies method which returns (indices, names)
-        #         idx, _ = self.robot.find_bodies(name)
-        #         if len(idx) > 0:
-        #             self.body_indices.append(idx[0])
-        #         else:
-        #             print(f"Warning: Body {name} not found in robot")
-        #     except Exception as e:
-        #         print(f"Warning: Error finding body {name}: {e}")
-
-        # self.dof_indices = torch.tensor(
-        #     self.robot.data.joint_names, dtype=torch.long, device=self.device
-        # )
 
         # Contact body indices for feet
         self.contact_body_indices = []
@@ -161,33 +160,21 @@ class T1Env(DirectRLEnv):
 
     def _setup_scene(self):
         """Setup the scene with robot and terrain."""
-        # Add robot
         self.robot = Articulation(self.cfg.robot)
-
-        # Add terrain
         self.terrain = TerrainImporter(self.cfg.terrain)
-
-        # Clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
         self.scene.filter_collisions(global_prim_paths=[])
-
-        # Add articulation to scene
         self.scene.articulations["robot"] = self.robot
-
-        # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
-
-        # Add collision sensors
         self.collision_sensors = ContactSensor(self.cfg.collision_sensors)
         self.scene.sensors["collision_sensors"] = self.collision_sensors
-
         self.foot_contact_sensors = ContactSensor(self.cfg.foot_contact_sensors)
         self.scene.sensors["foot_contact_sensors"] = self.foot_contact_sensors
 
     def reset(self, seed=None, options=None):
         """Override reset to initialize joint indices after first reset."""
-        # Initialize joint indices before any reset logic if not already done
+        # TODO this might be moved to setup scene or deleted
         if self.contact_body_indices is None:
             self._get_joint_indices()
 
@@ -195,11 +182,6 @@ class T1Env(DirectRLEnv):
         result = super().reset(seed=seed, options=options)
 
         return result
-
-    def _post_init_setup(self):
-        """Setup joint and body indices after scene creation."""
-        # This method is no longer needed as we use the reset override
-        pass
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Process actions before physics step."""
@@ -246,7 +228,15 @@ class T1Env(DirectRLEnv):
 
         # Update feet positions
         self.last_feet_pos = self.feet_pos.clone()
-        self.feet_pos = self.robot.data.body_state_w[:, self.contact_body_indices, :3]
+        self.feet_pos = self.robot.data.body_link_pos_w[:, self.contact_body_indices]
+        self.feet_quat = self.robot.data.body_link_quat_w[:, self.contact_body_indices]
+        roll, _, yaw = euler_xyz_from_quat(self.feet_quat.reshape(-1, 4))
+        self.feet_roll = (
+            roll.reshape(self.num_envs, len(self.contact_body_indices)) + torch.pi
+        ) % (2 * torch.pi) - torch.pi
+        self.feet_yaw = (
+            yaw.reshape(self.num_envs, len(self.contact_body_indices)) + torch.pi
+        ) % (2 * torch.pi) - torch.pi
 
         # Joint states
         joint_pos = self.robot.data.joint_pos[:, self.dof_indices]
@@ -289,83 +279,97 @@ class T1Env(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         """Compute reward for the current step - match Isaac Gym implementation."""
-        total_reward = torch.zeros(self.num_envs, device=self.device)
 
-        survival_rew = self.cfg.survival_reward_scale
-        total_reward += survival_rew
+        SURVIVAL = 0
+        TRACKING_LIN_VEL_X = 1
+        TRACKING_LIN_VEL_Y = 2
+        TRACKING_ANG_VEL = 3
+        BASE_HEIGHT = 4
+        COLLISIONS = 5
+        LIN_VEL_Z = 6
+        ANG_VEL_XY = 7
+        ORIENTATION = 8
+        TORQUES = 9
+        DOF_VEL = 10
+        DOF_ACC = 11
+        ROOT_ACC = 12
+        ACTION_RATE = 13
+        DOF_POS_LIMITS = 14
+        POWER = 15
+        FEET_SLIP = 16
+        FEET_ROLL = 17
+        FEET_YAW_DIFF = 18
+        FEET_YAW_MEAN = 19
+        FEET_DISTANCE = 20
+        FEET_SWING = 21
+        NUM_REWARD_TERMS = 22
+
+        reward_terms = torch.zeros(self.num_envs, NUM_REWARD_TERMS, device=self.device)
+
+        reward_terms[:, SURVIVAL] = self.cfg.survival_reward_scale
 
         lin_vel_x_error = torch.square(
             self.commands[:, 0] - self.filtered_lin_vel[:, 0]
         )
-        lin_vel_x_rew = (
+        reward_terms[:, TRACKING_LIN_VEL_X] = (
             torch.exp(-lin_vel_x_error / self.cfg.tracking_sigma)
             * self.cfg.tracking_lin_vel_x_reward_scale
         )
-        total_reward += lin_vel_x_rew
 
         lin_vel_y_error = torch.square(
             self.commands[:, 1] - self.filtered_lin_vel[:, 1]
         )
-        lin_vel_y_rew = (
+        reward_terms[:, TRACKING_LIN_VEL_Y] = (
             torch.exp(-lin_vel_y_error / self.cfg.tracking_sigma)
             * self.cfg.tracking_lin_vel_y_reward_scale
         )
-        total_reward += lin_vel_y_rew
 
         ang_vel_error = torch.square(self.commands[:, 2] - self.filtered_ang_vel[:, 2])
-        ang_vel_rew = (
+        reward_terms[:, TRACKING_ANG_VEL] = (
             torch.exp(-ang_vel_error / self.cfg.tracking_sigma)
             * self.cfg.tracking_ang_vel_reward_scale
         )
-        total_reward += ang_vel_rew
 
         base_height = self.robot.data.root_pos_w[:, 2]
         height_error = torch.square(base_height - self.cfg.base_height_target)
-        height_penalty = height_error * self.cfg.base_height_reward_scale
-        total_reward += height_penalty
+        reward_terms[:, BASE_HEIGHT] = height_error * self.cfg.base_height_reward_scale
 
         collision_body_violations = (
             torch.norm(self.collision_sensors.data.net_forces_w, dim=-1) > 1.0
         )
         num_collision_violations = collision_body_violations.sum(dim=-1)
-        collision_penalty = num_collision_violations * self.cfg.collision_reward_scale
-        total_reward += collision_penalty
+        reward_terms[:, COLLISIONS] = (
+            num_collision_violations * self.cfg.collision_reward_scale
+        )
 
-        lin_vel_z_penalty = (
+        reward_terms[:, LIN_VEL_Z] = (
             torch.square(self.filtered_lin_vel[:, 2]) * self.cfg.lin_vel_z_reward_scale
         )
-        total_reward += lin_vel_z_penalty
 
-        ang_vel_xy_penalty = (
+        reward_terms[:, ANG_VEL_XY] = (
             torch.sum(torch.square(self.robot.data.root_ang_vel_b[:, :2]), dim=-1)
             * self.cfg.ang_vel_xy_reward_scale
         )
-        total_reward += ang_vel_xy_penalty
 
-        orientation_penalty = (
+        reward_terms[:, ORIENTATION] = (
             torch.sum(torch.square(self.projected_gravity[:, :2]), dim=-1)
             * self.cfg.orientation_reward_scale
         )
-        total_reward += orientation_penalty
 
-        # TODO check applied torque is equivalent to self.torques
-        torque_penalty = (
+        reward_terms[:, TORQUES] = (
             torch.sum(torch.square(self.robot.data.applied_torque), dim=-1)
             * self.cfg.torques_reward_scale
         )
-        total_reward += torque_penalty
 
         dof_vel = self.robot.data.joint_vel
-        dof_vel_penalty = (
+        reward_terms[:, DOF_VEL] = (
             torch.sum(torch.square(dof_vel), dim=-1) * self.cfg.dof_vel_reward_scale
         )
-        total_reward += dof_vel_penalty
 
         joint_acc = (self.last_dof_vel - dof_vel) / self.step_dt
-        dof_acc_penalty = (
+        reward_terms[:, DOF_ACC] = (
             torch.sum(torch.square(joint_acc), dim=-1) * self.cfg.dof_acc_reward_scale
         )
-        total_reward += dof_acc_penalty
 
         root_lin_acc = (
             self.last_filtered_lin_vel - self.filtered_lin_vel
@@ -373,35 +377,26 @@ class T1Env(DirectRLEnv):
         root_ang_acc = (
             self.last_filtered_ang_vel - self.filtered_ang_vel
         ) / self.step_dt
-        root_acc_penalty = (
+        reward_terms[:, ROOT_ACC] = (
             torch.sum(torch.square(root_lin_acc), dim=-1)
             + torch.sum(torch.square(root_ang_acc), dim=-1)
         ) * self.cfg.root_acc_reward_scale
-        total_reward += root_acc_penalty
 
-        action_rate_penalty = (
+        reward_terms[:, ACTION_RATE] = (
             torch.sum(torch.square(self.last_actions - self.actions), dim=-1)
             * self.cfg.action_rate_reward_scale
         )
-        total_reward += action_rate_penalty
 
         # DOF position limits penalty - fixed shape handling
-        joint_pos_limits_lower = self.robot.data.joint_pos_limits[
-            0, :, 0
-        ]  # [num_joints]
-        joint_pos_limits_upper = self.robot.data.joint_pos_limits[
-            0, :, 1
-        ]  # [num_joints]
-
+        joint_pos_limits_lower = self.robot.data.joint_pos_limits[0, :, 0]
+        joint_pos_limits_upper = self.robot.data.joint_pos_limits[0, :, 1]
         lower = joint_pos_limits_lower + 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
             joint_pos_limits_upper - joint_pos_limits_lower
         )
-
         upper = joint_pos_limits_upper - 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
             joint_pos_limits_upper - joint_pos_limits_lower
         )
-
-        dof_pos_limits_penalty = (
+        reward_terms[:, DOF_POS_LIMITS] = (
             torch.sum(
                 (
                     (self.robot.data.joint_pos < lower)
@@ -411,7 +406,6 @@ class T1Env(DirectRLEnv):
             )
             * self.cfg.dof_pos_limits_reward_scale
         )
-        total_reward += dof_pos_limits_penalty
 
         # lower_soft = lower_limits + 0.5 * (1 - self.cfg.soft_dof_pos_limit) * (
         #     upper_limits - lower_limits
@@ -468,64 +462,110 @@ class T1Env(DirectRLEnv):
         # i could implement a difference between calculated and applied but it's a small scale
         # total_reward += torque_tiredness_penalty
 
-        power_penalty = torch.sum(
+        reward_terms[:, POWER] = torch.sum(
             (self.robot.data.applied_torque * self.robot.data.joint_vel).clip(min=0.0),
             dim=-1,
         )
-        total_reward += power_penalty
 
-        # missed feet slip
         feet_movement = torch.square(
             torch.sum(((self.last_feet_pos - self.feet_pos) / self.step_dt), dim=-1)
         )
         feet_ground_contact = self.foot_contact_sensors.data.net_forces_w[:, :, 2] > 0.0
         feet_slip = torch.sum(feet_movement * feet_ground_contact, dim=-1)
-        feet_slip_penalty = (
+        reward_terms[:, FEET_SLIP] = (
             feet_slip
             * self.cfg.feet_slip_reward_scale
             * (self.episode_length_buf > 1).float()
         )
-        total_reward += feet_slip_penalty
 
         # missed feet vel z
         # (disabled)
 
-        # missed feet roll
+        feet_roll = torch.sum(torch.square(self.feet_roll), dim=-1)
+        reward_terms[:, FEET_ROLL] = feet_roll * self.cfg.feet_roll_reward_scale
 
-        # missed feet yaw diff
+        feet_yaw_diff = torch.square(
+            (self.feet_yaw[:, 1] - self.feet_yaw[:, 0] + torch.pi) % (2 * torch.pi)
+            - torch.pi
+        )
+        reward_terms[:, FEET_YAW_DIFF] = (
+            feet_yaw_diff * self.cfg.feet_yaw_diff_reward_scale
+        )
 
-        # missed feet yaw mean
+        feet_yaw_mean = self.feet_yaw.mean(dim=-1) + torch.pi * (
+            torch.abs(self.feet_yaw[:, 1] - self.feet_yaw[:, 0]) > torch.pi
+        )
+        reward_terms[:, FEET_YAW_MEAN] = (
+            torch.square(
+                (
+                    euler_xyz_from_quat(self.robot.data.root_quat_w)[2]
+                    - feet_yaw_mean
+                    + torch.pi
+                )
+                % (2 * torch.pi)
+                - torch.pi
+            )
+            * self.cfg.feet_yaw_mean_reward_scale
+        )
 
-        # missed reward feet distance
+        # TODO probably squared reward
+        _, _, base_yaw = euler_xyz_from_quat(self.robot.data.root_quat_w)
+        feet_distance = torch.abs(
+            torch.cos(base_yaw) * (self.feet_pos[:, 1, 1] - self.feet_pos[:, 0, 1])
+            - torch.sin(base_yaw) * (self.feet_pos[:, 1, 0] - self.feet_pos[:, 0, 0])
+        )
+        reward_terms[:, FEET_DISTANCE] = (
+            torch.clip(
+                self.cfg.feet_distance_reward_scale - feet_distance, min=0.0, max=1.0
+            )
+            * self.cfg.feet_distance_reward_scale
+        )
 
-        # Simple swing reward based on gait phase
         left_swing = (
             torch.abs(self.gait_process - 0.25) < 0.5 * self.cfg.swing_period
         ) & (self.gait_frequency > 1e-8)
         right_swing = (
             torch.abs(self.gait_process - 0.75) < 0.5 * self.cfg.swing_period
         ) & (self.gait_frequency > 1e-8)
+        reward_terms[:, FEET_SWING] = (
+            left_swing & ~feet_ground_contact[:, 0]
+        ).float() + (
+            right_swing & ~feet_ground_contact[:, 1]
+        ).float() * self.cfg.feet_swing_reward_scale
 
-        # For now, assume feet are not in contact during swing (simplified)
-        # TODO this needs a contact something
-        feet_swing_reward = (
-            left_swing.float() + right_swing.float()
-        ) * self.cfg.feet_swing_reward_scale
-        total_reward += feet_swing_reward
+        # Apply optional positive-only clipping to all reward terms if configured
+        if self.cfg.only_positive_rewards:
+            reward_terms = torch.clip(reward_terms, min=0.0)
 
-        # Store episode sums for tracking
-        self.episode_sums["survival"] += survival_rew
-        self.episode_sums["tracking_lin_vel_x"] += lin_vel_x_rew
-        self.episode_sums["tracking_lin_vel_y"] += lin_vel_y_rew
-        self.episode_sums["tracking_ang_vel"] += ang_vel_rew
-        self.episode_sums["base_height"] += -height_penalty
-        self.episode_sums["orientation"] += -orientation_penalty
-        self.episode_sums["torques"] += -torque_penalty
-        self.episode_sums["dof_vel"] += -dof_vel_penalty
-        self.episode_sums["dof_acc"] += -dof_acc_penalty
-        self.episode_sums["action_rate"] += -action_rate_penalty
+        # Store episode sums for tracking (using individual terms from the tensor)
+        self.episode_sums["survival"] += reward_terms[:, SURVIVAL]
+        self.episode_sums["tracking_lin_vel_x"] += reward_terms[:, TRACKING_LIN_VEL_X]
+        self.episode_sums["tracking_lin_vel_y"] += reward_terms[:, TRACKING_LIN_VEL_Y]
+        self.episode_sums["tracking_ang_vel"] += reward_terms[:, TRACKING_ANG_VEL]
+        self.episode_sums["base_height"] += reward_terms[:, BASE_HEIGHT]
+        self.episode_sums["collisions"] += reward_terms[:, COLLISIONS]
+        self.episode_sums["lin_vel_z"] += reward_terms[:, LIN_VEL_Z]
+        self.episode_sums["ang_vel_xy"] += reward_terms[:, ANG_VEL_XY]
+        self.episode_sums["orientation"] += reward_terms[:, ORIENTATION]
+        self.episode_sums["torques"] += reward_terms[:, TORQUES]
+        self.episode_sums["dof_vel"] += reward_terms[:, DOF_VEL]
+        self.episode_sums["dof_acc"] += reward_terms[:, DOF_ACC]
+        self.episode_sums["root_acc"] += reward_terms[:, ROOT_ACC]
+        self.episode_sums["action_rate"] += reward_terms[:, ACTION_RATE]
+        self.episode_sums["dof_pos_limits"] += reward_terms[:, DOF_POS_LIMITS]
+        self.episode_sums["power"] += reward_terms[:, POWER]
+        self.episode_sums["feet_slip"] += reward_terms[:, FEET_SLIP]
+        self.episode_sums["feet_roll"] += reward_terms[:, FEET_ROLL]
+        self.episode_sums["feet_yaw_diff"] += reward_terms[:, FEET_YAW_DIFF]
+        self.episode_sums["feet_yaw_mean"] += reward_terms[:, FEET_YAW_MEAN]
+        self.episode_sums["feet_distance"] += reward_terms[:, FEET_DISTANCE]
+        self.episode_sums["feet_swing"] += reward_terms[:, FEET_SWING]
+
+        # Sum all reward terms efficiently: shape (num_envs,)
+        total_reward = torch.sum(reward_terms, dim=1)
 
         # Update previous states
+        # TODO this should be moved
         self.last_dof_vel = dof_vel.clone()
         self.last_root_vel = torch.cat(
             [self.robot.data.root_lin_vel_w, self.robot.data.root_ang_vel_w], dim=1

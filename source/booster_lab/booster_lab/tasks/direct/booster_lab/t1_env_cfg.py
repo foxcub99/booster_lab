@@ -22,7 +22,7 @@ class T1EnvCfg(DirectRLEnvCfg):
 
     # env
     episode_length_s = 30.0  # Match Isaac Gym's episode length
-    decimation = 1  # Match Isaac Gym's decimation
+    decimation = 10  # Match Isaac Gym's control decimation * substeps
     num_actions = 12
     num_observations = 47  # Match Isaac Gym: 3+3+3+2+12+12+12 = 47
     num_states = 0  # No asymmetric observations for now
@@ -34,7 +34,7 @@ class T1EnvCfg(DirectRLEnvCfg):
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 500,  # 500 Hz to match Isaac Gym's 0.002 timestep
+        dt=1 / 500,  # 500 Hz to match Isaac Gym's 0.002 timestep / 1 substep
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -205,6 +205,7 @@ class T1EnvCfg(DirectRLEnvCfg):
     feet_roll_reward_scale = -0.1
     feet_distance_reward_scale = -1.0
     feet_swing_reward_scale = 3.0
+    only_positive_rewards = True  # Match Isaac Gym's positive rewards behavior
 
     # normalization
     gravity_normalization = 1.0
