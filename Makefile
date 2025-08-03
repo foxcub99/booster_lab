@@ -44,8 +44,7 @@ view-recent-log:
 	@echo [INFO] If you run into errors, make sure to 'conda deactivate' so that it uses Isaac\'s Python
 	@for /f %%i in ('dir /b /ad /o-d logs\skrl\booster_lab') do ( \
 		echo [INFO] Launching TensorBoard with logdir=logs\skrl\booster_lab\%%i && \
-		$(ISAAC_LAB_CMD) -m tensorboard.main --logdir logs/skrl/booster_lab/%%i \
-		& goto end \
+		$(ISAAC_LAB_CMD) -m tensorboard.main --logdir logs/skrl/booster_lab/%%i && \
+		goto :eof \
 	)
-	@:end
 

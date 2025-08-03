@@ -470,7 +470,7 @@ class T1Env(DirectRLEnv):
         feet_movement = torch.square(
             torch.sum(((self.last_feet_pos - self.feet_pos) / self.step_dt), dim=-1)
         )
-        feet_ground_contact = self.foot_contact_sensors.data.net_forces_w[:, :, 2] > 0.0
+        feet_ground_contact = torch.sum(self.foot_contact_sensors.data.net_forces_w, dim=-1) > 0.0
         feet_slip = torch.sum(feet_movement * feet_ground_contact, dim=-1)
         reward_terms[:, FEET_SLIP] = (
             feet_slip

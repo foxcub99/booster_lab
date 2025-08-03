@@ -75,7 +75,7 @@ class T1EnvCfg(DirectRLEnvCfg):
     robot: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"C:/Users/reill/booster_gym/booster_lab/source/booster_lab/booster_lab/assets/t1/t1.usd",  # absolute filepath
+            usd_path=f"C:/Users/reill/lab/booster_lab/source/booster_lab/booster_lab/assets/t1/t1.usd",  # absolute filepath
             activate_contact_sensors=True,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
@@ -205,7 +205,7 @@ class T1EnvCfg(DirectRLEnvCfg):
     feet_roll_reward_scale = -0.1
     feet_distance_reward_scale = -1.0
     feet_swing_reward_scale = 3.0
-    only_positive_rewards = True  # Match Isaac Gym's positive rewards behavior
+    only_positive_rewards = False  # Match Isaac Gym's positive rewards behavior
 
     # normalization
     gravity_normalization = 1.0
