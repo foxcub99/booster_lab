@@ -43,7 +43,7 @@ params:
   load_path: '' # path to the checkpoint to load
 
   config:
-    name: cartpole_direct
+    name: booster_lab
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'
