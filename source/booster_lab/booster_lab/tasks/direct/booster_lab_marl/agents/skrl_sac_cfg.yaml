@@ -1,0 +1,102 @@
+seed: 42
+
+
+# Models are instantiated using skrl's model instantiator utility
+# https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
+models:
+  separate: True
+  policy:  # see gaussian_model parameters
+    class: GaussianMixin
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -20.0
+    max_log_std: 2.0
+    initial_log_std: 0.0
+    network:
+      - name: net
+        input: STATES
+        layers: [256, 256]
+        activations: relu
+    output: ACTIONS
+  critic_1:  # see deterministic_model parameters
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: STATES_ACTIONS
+        layers: [256, 256]
+        activations: relu
+    output: ONE
+  critic_2:  # see deterministic_model parameters
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: STATES_ACTIONS
+        layers: [256, 256]
+        activations: relu
+    output: ONE
+  target_critic_1:  # see deterministic_model parameters
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: STATES_ACTIONS
+        layers: [256, 256]
+        activations: relu
+    output: ONE
+  target_critic_2:  # see deterministic_model parameters
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: STATES_ACTIONS
+        layers: [256, 256]
+        activations: relu
+    output: ONE
+
+
+# Replay memory for off-policy learning
+# https://skrl.readthedocs.io/en/latest/api/memories/random.html
+memory:
+  class: RandomMemory
+  memory_size: 10000  # replay buffer size (optimized for 16GB VRAM with 4096 envs)
+
+
+# SAC agent configuration (field names are from SAC_DEFAULT_CONFIG)
+# https://skrl.readthedocs.io/en/latest/api/agents/sac.html
+agent:
+  class: SAC
+  gradient_steps: 1
+  batch_size: 256
+  discount_factor: 0.99
+  polyak: 0.005
+  actor_learning_rate: 3.0e-04
+  critic_learning_rate: 3.0e-04
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: {}
+  state_preprocessor: null
+  state_preprocessor_kwargs: {}
+  random_timesteps: 1000
+  learning_starts: 1000
+  grad_norm_clip: 0
+  learn_entropy: True
+  entropy_learning_rate: 3.0e-04
+  initial_entropy_value: 0.2
+  target_entropy: null  # will be set automatically to -action_space_dim
+  rewards_shaper: null
+  time_limit_bootstrap: False
+  # logging and checkpoint
+  experiment:
+    directory: "booster_lab"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+
+# Sequential trainer
+# https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
+trainer:
+  class: SequentialTrainer
+  timesteps: 100000  # SAC typically needs more timesteps than on-policy methods
+  environment_info: log
